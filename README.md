@@ -58,6 +58,8 @@ blinder-backend/
 - CORS enabled with configurable origins
 - Automatic token refresh mechanism
 
+### Database
+- For database you can import this BSON Archive https://drive.google.com/file/d/1xaEm63LmDDDa1pxDR6NHzJ23yTB2CYgG/view?usp=drive_link
 ---
 
 ## Turkish
@@ -114,4 +116,7 @@ blinder-backend/
 ### Güvenlik
 - JWT tabanlı kimlik doğrulama
 - Yapılandırılabilir origin'ler ile CORS desteği
-- Otomatik token yenileme mekanizması 
+- Otomatik token yenileme mekanizması
+
+### Database
+- For database you can import this BSON Archive https://drive.google.com/file/d/1xaEm63LmDDDa1pxDR6NHzJ23yTB2CYgG/view?usp=drive_link
