@@ -6,8 +6,14 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 import config
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
+import random
+import string
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from werkzeug.security import generate_password_hash, check_password_hash
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -16,6 +22,7 @@ client = MongoClient(config.MONGO_URI)
 db = client["blinder"]
 users_collection = db["users"]
 counters_collection = db["counters"]
+verification_codes_collection = db["verification_codes"]
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 
 
@@ -52,6 +59,62 @@ def get_zodiac_sign(birthdate):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def generate_verification_code():
+    """6 haneli doğrulama kodu oluşturur"""
+    return ''.join(random.choices(string.digits, k=6))
+
+
+def send_verification_email(email, code):
+    """Doğrulama e-postası gönderir (HTML şablonlu)"""
+    try:
+        if not config.EMAIL_USER or not config.EMAIL_PASSWORD:
+            print("E-posta ayarları eksik!")
+            return False
+
+        msg = MIMEMultipart("alternative")
+        msg['From'] = config.EMAIL_USER
+        msg['To'] = email
+        msg['Subject'] = "Blinder - E-posta Doğrulama Kodu"
+
+        html = f"""
+        <html>
+        <body style='font-family: Arial, sans-serif; background: #f7f7fa; padding: 0; margin: 0;'>
+            <div style='max-width: 400px; margin: 40px auto; background: #fff; border-radius: 12px; box-shadow: 0 2px 8px #e2e2e2; padding: 32px;'>
+                <h2 style='color: #805AD5; text-align: center; margin-bottom: 24px;'>Blinder</h2>
+                <p style='font-size: 16px; color: #333;'>Merhaba,</p>
+                <p style='font-size: 16px; color: #333;'>Blinder uygulamasına kayıt olmak için doğrulama kodunuz:</p>
+                <div style='text-align: center; margin: 24px 0;'>
+                    <span style='display: inline-block; font-size: 32px; letter-spacing: 8px; color: #fff; background: #805AD5; padding: 12px 32px; border-radius: 8px;'>
+                        {code}
+                    </span>
+                </div>
+                <p style='font-size: 14px; color: #666;'>
+                    Bu kod 10 dakika boyunca geçerlidir.<br>
+                    Eğer bu işlemi siz yapmadıysanız, lütfen bu e-postayı dikkate almayın.
+                </p>
+                <hr style='border: none; border-top: 1px solid #eee; margin: 24px 0;'>
+                <p style='font-size: 12px; color: #aaa; text-align: center;'>
+                    Bu e-posta otomatik olarak gönderilmiştir. Yanıtlamayınız.<br>
+                    &copy; 2024 Blinder
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+        msg.attach(MIMEText(html, 'html'))
+
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(config.EMAIL_USER, config.EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        return True
+    except Exception as e:
+        print(f"E-posta gönderme hatası: {str(e)}")
+        return False
 
 
 @auth_bp.route("/google-login", methods=["POST"])
@@ -115,7 +178,8 @@ def microsoft_login():
     try:
         code = request.json.get("idToken")
         if not code:
-            return jsonify({"error": "Authorization code gerekli!"}), 400
+            print("No code/idToken received!")
+            return jsonify({"error": "Microsoft hesabı seçilmedi veya işlem iptal edildi!"}), 400
 
         token_url = f"https://login.microsoftonline.com/{config.MICROSOFT_TENANT_ID}/oauth2/v2.0/token"
         data = {
@@ -138,11 +202,14 @@ def microsoft_login():
         id_token_value = tokens.get("id_token")
         access_token_ms = tokens.get("access_token")
         if not id_token_value or not access_token_ms:
+            print("Token exchange'den gerekli tokenlar alınamadı!")
             return jsonify({"error": "Token exchange'den gerekli tokenlar alınamadı!"}), 400
 
         headers = {"Authorization": f"Bearer {access_token_ms}"}
         userinfo_response = requests.get("https://graph.microsoft.com/oidc/userinfo", headers=headers)
+
         if userinfo_response.status_code != 200:
+            print("Microsoft doğrulama başarısız!")
             return jsonify({
                 "error": "Microsoft doğrulama başarısız!",
                 "details": userinfo_response.text
@@ -151,6 +218,7 @@ def microsoft_login():
         microsoft_info = userinfo_response.json()
         email = microsoft_info.get("email")
         if not email or not is_academic_email(email):
+            print("Sadece akademik e-postalar kabul edilir!", email)
             return jsonify({"error": "Sadece akademik e-postalar kabul edilir!"}), 400
 
         user = users_collection.find_one({"email": email})
@@ -186,7 +254,7 @@ def microsoft_login():
         return jsonify({"access_token": access_token, "user": user})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": f"Beklenmeyen hata: {str(e)}"}), 400
 
 
 @auth_bp.route("/update-profile", methods=["POST"])
@@ -229,6 +297,7 @@ def update_profile():
         zodiac_sign = get_zodiac_sign(birthdate)
 
         update_data = {
+            "name": data["name"],
             "university": data["university"],
             "university_location": data["university_location"],
             "birthdate": birthdate.strftime("%Y-%m-%d"),
@@ -399,5 +468,163 @@ def get_user_photos_by_id(user_id):
         photos_doc = db.photos.find_one({"user_id": user_id})
         photos = photos_doc["photos"] if photos_doc and "photos" in photos_doc else []
         return jsonify({"photos": photos}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@auth_bp.route("/send-verification", methods=["POST"])
+def send_verification():
+    """E-posta doğrulama kodu gönderir"""
+    try:
+        email = request.json.get("email")
+        if not email:
+            return jsonify({"error": "E-posta adresi gerekli!"}), 400
+
+        if not is_academic_email(email):
+            return jsonify({"error": "Sadece akademik e-postalar kabul edilir!"}), 400
+
+        existing_user = users_collection.find_one({"email": email})
+        if existing_user:
+            return jsonify({"error": "Bu e-posta adresi zaten kayıtlı!"}), 400
+
+        verification_code = generate_verification_code()
+        expiry_time = datetime.utcnow() + timedelta(minutes=10)
+
+        verification_codes_collection.delete_many({"email": email})
+
+        verification_codes_collection.insert_one({
+            "email": email,
+            "code": verification_code,
+            "expiry": expiry_time,
+            "created_at": datetime.utcnow()
+        })
+
+        if send_verification_email(email, verification_code):
+            return jsonify({"message": "Doğrulama kodu gönderildi"}), 200
+        else:
+            return jsonify({"error": "Doğrulama kodu gönderilemedi!"}), 500
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@auth_bp.route("/verify-code", methods=["POST"])
+def verify_code():
+    """Doğrulama kodunu kontrol eder"""
+    try:
+        email = request.json.get("email")
+        code = request.json.get("code")
+
+        if not email or not code:
+            return jsonify({"error": "E-posta ve doğrulama kodu gerekli!"}), 400
+
+        verification = verification_codes_collection.find_one({
+            "email": email,
+            "code": code,
+            "expiry": {"$gt": datetime.utcnow()}
+        })
+
+        if not verification:
+            return jsonify({"error": "Geçersiz veya süresi dolmuş doğrulama kodu!"}), 400
+
+        temp_token = create_access_token(
+            identity=email,
+            expires_delta=timedelta(minutes=15)
+        )
+
+        return jsonify({
+            "message": "Doğrulama başarılı",
+            "temp_token": temp_token
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@auth_bp.route("/manual-register", methods=["POST"])
+def manual_register():
+    """Manuel kayıt işlemini tamamlar"""
+    try:
+        email = request.json.get("email")
+        password = request.json.get("password")
+
+        if not email or not password:
+            return jsonify({"error": "E-posta ve şifre gerekli!"}), 400
+
+        if len(password) < 6:
+            return jsonify({"error": "Şifre en az 6 karakter olmalıdır!"}), 400
+
+        if not is_academic_email(email):
+            return jsonify({"error": "Sadece akademik e-postalar kabul edilir!"}), 400
+
+        existing_user = users_collection.find_one({"email": email})
+        if existing_user:
+            return jsonify({"error": "Bu e-posta adresi zaten kayıtlı!"}), 400
+
+        hashed_password = generate_password_hash(password)
+
+        user_id = get_next_user_id()
+        user = {
+            "_id": user_id,
+            "email": email,
+            "password": hashed_password,
+            "created_at": datetime.utcnow(),
+            "university": None,
+            "university_location": None,
+            "birthdate": None,
+            "zodiac_sign": None,
+            "gender": None,
+            "gender_preference": None,
+            "height": None,
+            "relationship_goal": None,
+            "likes": [],
+            "values": [],
+            "alcohol": None,
+            "smoking": None,
+            "religion": None,
+            "political_view": None,
+            "favorite_food": []
+        }
+
+        users_collection.insert_one(user)
+
+        verification_codes_collection.delete_many({"email": email})
+
+        access_token = create_access_token(identity=email)
+
+        return jsonify({
+            "message": "Kayıt başarılı",
+            "access_token": access_token,
+            "user": user
+        }), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@auth_bp.route("/signin", methods=["POST"])
+def signin():
+    """Manuel giriş işlemi"""
+    try:
+        email = request.json.get("email")
+        password = request.json.get("password")
+
+        if not email or not password:
+            return jsonify({"error": "E-posta ve şifre gerekli!"}), 400
+
+        user = users_collection.find_one({"email": email})
+        if not user:
+            return jsonify({"error": "Kullanıcı bulunamadı!"}), 404
+
+        if not check_password_hash(user.get("password", ""), password):
+            return jsonify({"error": "Geçersiz şifre!"}), 401
+
+        access_token = create_access_token(identity=email)
+        return jsonify({
+            "message": "Giriş başarılı",
+            "access_token": access_token,
+            "user": user
+        }), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
