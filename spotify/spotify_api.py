@@ -132,7 +132,7 @@ def spotify_callback():
         }
         spotify_collection.insert_one(new_record)
 
-    return redirect("http://localhost:8081/profile")
+    return redirect("http://localhost:8081/profile/profile")
 
 
 @spotify_bp.route("/top-tracks", methods=["GET"])
